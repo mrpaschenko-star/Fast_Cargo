@@ -1,0 +1,54 @@
+@startuml
+skinparam defaultFontName SansSerif
+skinparam defaultFontSize 13
+skinparam maxMessageSize 68
+skinparam sequenceMessageAlign center
+title Fast Cargo — EDI и защита платежа при timeout
+participant "EDI Adapter" as E
+participant "Orders / Saga" as O
+participant Warehouse as W
+participant Finance as F
+participant Payments as P
+participant "Банк" as B
+note over E,P
+  Междоменные команды/факты: Kafka, outbox + inbox.
+  Каждая запись состояния — локальная транзакция.
+end note
+E -> O : ORDERS(document_id, revision)
+O -> O : Durable pending + outbox
+O -> W : Reserve(order_id, lines, version)
+W -> W : Атомарно проверить и зарезервировать
+W --> O : Reserved(reservation_id, version)
+W -> W : Подтверждённая отгрузка
+W -> E : DESADV(fulfilment_id, lines, version)
+W -> F : FulfilmentConfirmed
+F -> F : Создать invoice по отгруженным позициям
+F -> E : INVOIC(invoice_id, revision)
+O -> W : AuthorizePayment(intent_id, fulfilment_version)
+W -> W : Зафиксировать одноразовый permit
+W -> P : Stock/FulfilmentPermit(intent_id, lines)
+F -> P : InvoicePermit(intent_id, amount, currency)
+P -> P : Сверить оба permit; durable intent
+P -> B : Create / capture (stable idempotency key)
+B -> B : Платёж выполнен
+B -x P : Ответ потерян / timeout
+P -> P : UNKNOWN, а не FAILED
+note over W,F
+  Не освобождать резерв и не отменять permit по TTL.
+  Для отгрузки сохраняется неизменяемое основание.
+  Отмена требует terminal cancel банка через Payments.
+end note
+P -> B : Status / reconciliation (тот же intent)
+B --> P : SUCCEEDED + provider_ref
+P -> P : Inbox / unique transition + outbox
+P -> F : PaymentSucceeded(intent_id, provider_ref)
+F -> F : Одна проводка по уникальному ключу
+P -> W : PaymentSucceeded — закрыть обязательство
+B -> P : Поздний подписанный callback
+P -> P : Dedup; durable receipt
+P --> B : ACK
+note over E,B
+  Предоплата — отдельная ветка до отгрузки с удерживаемым резервом.
+  Saga обеспечивает безопасность при отказе; завершение может ждать сеть.
+end note
+@enduml

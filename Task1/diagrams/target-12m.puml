@@ -1,0 +1,91 @@
+@startuml
+!pragma layout smetana
+!define RELATIVE_INCLUDE
+!include ../../vendor/C4-PlantUML/C4_Container.puml
+LAYOUT_TOP_DOWN()
+skinparam defaultFontName SansSerif
+skinparam defaultFontSize 12
+skinparam wrapWidth 190
+skinparam nodesep 28
+skinparam ranksep 40
+
+title Fast Cargo — Target M12 / C4 Container
+Person(client,"Клиент / водитель","Web / mobile")
+System_Ext(partner,"Торговые сети","EDI ORDERS / DESADV / INVOIC")
+System_Ext(bank,"Банк-эквайер","Hosted page; PAN только здесь")
+System_Ext(crm,"CRM холдинга","Операторы / чат-боты")
+System_Ext(dwh,"DWH холдинга","Обезличенная аналитика")
+System_Ext(device,"Датчики","GPS / ГЛОНАСС; offline buffer")
+System_Boundary(fc,"Fast Cargo · платформа холдинга / защищённые сегменты") {
+ Container(edge,"API Gateway","Envoy / корпоративный gateway","Auth, routing, limits; без бизнес-Saga")
+ Container(web,"Web BFF","HTTP API","Клиентские сценарии")
+ Container(mobile,"Mobile BFF","HTTP API","Назначенные водителю рейсы")
+ Boundary(domains,"Независимые бизнес-домены") {
+  Container(orders,"Orders + Saga","Service","Приём pending; workflow и команды")
+  ContainerDb(odb,"Orders DB","PostgreSQL","Заказы, workflow, outbox/inbox")
+  Container(warehouse,"Warehouse","Service","Остаток, резерв, fulfilment, permit")
+  ContainerDb(wdb,"Warehouse DB","PostgreSQL","Только владелец stock")
+  Container(delivery,"Delivery","Service","Рейсы и доставка")
+  ContainerDb(ddb,"Delivery DB","PostgreSQL","Назначения, статусы")
+  Container(finance,"Finance","Service","Invoice / ledger; разрешение суммы")
+  ContainerDb(fdb,"Finance DB","PostgreSQL","Счета, проводки, outbox/inbox")
+ }
+ Container(edi,"EDI Adapter","Service","Контракты партнёров, receipts, dedup")
+ ContainerDb(edb,"EDI DB","PostgreSQL","Документы / версии / inbox")
+ ContainerQueue(events,"Business events / commands","Kafka HA","At-least-once; schema / keys / ACL")
+ Boundary(paymentzone,"Физически изолированный платёжный контур") {
+  Container(payment,"Payments","Provider adapter","Intent, webhook inbox, reconciliation")
+  ContainerDb(pdb,"Payments DB","Отдельный PostgreSQL HA","Без PAN/CVV; отдельные ключи/доступы")
+ }
+ Boundary(piizone,"Физически изолированный контур ПДн") {
+  Container(profile,"Profile API","Service","Purpose + RBAC/ABAC + аудит")
+  ContainerDb(prdb,"Profile DB","Отдельный PostgreSQL HA","Паспорт / телефон / email / адрес")
+ }
+ Container(history,"History API / projector","Service","CRM read-model; freshness")
+ ContainerDb(hdb,"History DB","PostgreSQL projection","События заказов по ссылкам; без профилей")
+ Container(exporter,"Analytics / privacy export","Stream processor + state","Allowlist; обезличивание; сверка")
+ Boundary(iotzone,"IoT · независимые CPU / диски / сеть") {
+  Container(ingest,"Telemetry ingest","MQTT / HTTPS + durable bridge","ACK после replicated persistence")
+  ContainerQueue(iot,"Telemetry log","Отдельная Kafka HA","RF3; device_id; retention 72 ч (проект)")
+  Container(telemetry,"Telemetry projector / API","Stream consumers","Dedup, event-time, query API")
+  ContainerDb(tdb,"Telemetry store / archive","ClickHouse + object storage","GPS — защищённые данные")
+ }
+}
+Rel(client,edge,"HTTPS / OIDC")
+Rel(edge,web,"Web routes")
+Rel(edge,mobile,"Mobile routes")
+Rel(web,orders,"Принять заявку / статус","REST")
+Rel(mobile,delivery,"Маршруты / статусы","REST")
+Rel(web,payment,"Открыть разрешённый intent","REST")
+Rel(client,bank,"Redirect: ввод PAN напрямую","HTTPS")
+Rel(payment,bank,"Intent / status / reconcile","HTTPS")
+Rel(bank,payment,"Подписанный callback без PAN","HTTPS")
+Rel(payment,pdb,"Локальная транзакция")
+Rel(profile,prdb,"Scoped чтение / запись")
+Rel(crm,profile,"Разрешённые атрибуты","Scoped HTTPS")
+Rel(crm,history,"История + as_of","Scoped HTTPS")
+Rel(mobile,profile,"Адрес только назначенной доставки","Scoped HTTPS")
+Rel(web,profile,"Свой профиль","Scoped HTTPS")
+Rel(orders,odb,"Локальная транзакция")
+Rel(warehouse,wdb,"Локальная транзакция")
+Rel(delivery,ddb,"Локальная транзакция")
+Rel(finance,fdb,"Локальная транзакция")
+Rel(edi,edb,"Локальная транзакция")
+BiRel(partner,edi,"EDI + receipts","Согласованный транспорт")
+BiRel(edi,events,"Outbox / inbox")
+BiRel(orders,events,"Saga / outbox / inbox")
+BiRel(warehouse,events,"Reserve / permit / fulfilment")
+BiRel(delivery,events,"Dispatch / delivered")
+BiRel(finance,events,"Invoice / permission / payment result")
+BiRel(payment,events,"Разрешения / результаты; dedup")
+Rel(events,history,"Доменные факты")
+Rel(history,hdb,"Идемпотентная проекция")
+Rel(events,exporter,"Доменные факты вместо legacy CDC")
+Rel(exporter,dwh,"Обезличенный набор","Ingest API")
+Rel(device,ingest,"Device ID / seq / retry","MQTT / HTTPS")
+Rel(ingest,iot,"Durable write / ACK")
+Rel(iot,telemetry,"Replay / event-time")
+Rel(telemetry,tdb,"Append / aggregate / archive")
+Rel(delivery,telemetry,"Актуальная позиция","Query API")
+SHOW_LEGEND()
+@enduml
