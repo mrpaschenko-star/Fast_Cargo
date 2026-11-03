@@ -1,0 +1,45 @@
+@startuml
+!pragma layout smetana
+!define RELATIVE_INCLUDE
+!include ../../vendor/C4-PlantUML/C4_Container.puml
+LAYOUT_TOP_DOWN()
+skinparam defaultFontName SansSerif
+skinparam defaultFontSize 12
+skinparam wrapWidth 190
+skinparam nodesep 28
+skinparam ranksep 40
+
+title Fast Cargo — Transition M3 / C4 Container
+Person(user,"Клиент / водитель","Текущие операции")
+System_Boundary(fc,"Fast Cargo · защищённый контур") {
+ Boundary(legacy,"Легаси · исходники не меняются") {
+  Container(front,"Web / mobile + общий BFF","Существующие приложения","Логическая группа AS-IS")
+  Container(gateway,"Интеграционный шлюз","FastAPI / Uvicorn","Текущие API / webhook; риск timeout сохраняется")
+  Container(monolith,"Монолит","Orders / Warehouse / Delivery / Finance","Общая кодовая база")
+  ContainerDb(primary,"Primary PostgreSQL","Исходный инстанс","integration / master_data / operational")
+ }
+ Boundary(data,"Новый изолированный контур данных") {
+  ContainerDb(standby,"Физическая standby","PostgreSQL >=16, та же major","Из backup + WAL; snapshot и SELECT только здесь")
+  Container(cdc,"CDC adapter","Debezium / pgoutput после PoC","Read-only bootstrap; txn / LSN / checkpoint")
+  ContainerQueue(bus,"Приватный журнал","Kafka","Raw CDC с ПДн; ACL; ограниченный retention")
+  Container(privacy,"Status projection / privacy export","Stream processor + state","Сверка, версии, обезличивание; fail closed")
+ }
+}
+System_Ext(dwh,"DWH «Плюс Ритейл»","Только утверждённые обезличенные данные")
+Rel(user,front,"Создание / статусы","HTTPS")
+Rel(front,gateway,"Текущий API","HTTPS")
+Rel(gateway,monolith,"Синхронные вызовы")
+Rel(monolith,primary,"Текущие SQL")
+Rel(gateway,primary,"Текущие integration logs")
+Rel(primary,standby,"Физический WAL; не SELECT","Replication protocol")
+Rel(cdc,standby,"Snapshot + logical decode; metadata SELECT")
+Rel(cdc,bus,"Подтверждённые изменения","Kafka protocol")
+Rel(bus,privacy,"At-least-once; dedup / replay")
+Rel(privacy,dwh,"Версии статусов; проверка query visibility","Согласованный ingest API")
+note bottom of privacy
+  commit -> видимость DWH <=5 с — требование, не измеренный результат.
+  Пообъектная связность и обезличивание: решение ИБ/штаба до GO.
+  Подавленные записи / задержки не скрываются из SLA.
+end note
+SHOW_LEGEND()
+@enduml
